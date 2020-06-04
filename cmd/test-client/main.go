@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
+	"github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-core/protocol"
 
@@ -19,11 +24,16 @@ import (
 const TestProtocol = protocol.ID("/libp2p/test/data")
 
 func main() {
-	if len(os.Args) != 2 {
-		log.Fatal("expected one argument; the peer multiaddr")
+	streams := flag.Int("streams", 1, "number of parallel download streams")
+	flag.Parse()
+
+	if len(flag.Args()) != 1 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [options] peer", os.Args[0])
+		flag.PrintDefaults()
+		os.Exit(1)
 	}
 
-	a, err := ma.NewMultiaddr(os.Args[1])
+	a, err := ma.NewMultiaddr(flag.Args()[0])
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -56,26 +66,67 @@ func main() {
 
 	log.Printf("Connected; requesting data...")
 
-	s, err := host.NewStream(cctx, pi.ID, TestProtocol)
-	if err != nil {
-		log.Fatal(err)
+	if *streams == 1 {
+		s, err := host.NewStream(cctx, pi.ID, TestProtocol)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer s.Close()
+
+		file, err := os.OpenFile("/dev/null", os.O_WRONLY, 0)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer file.Close()
+
+		log.Printf("Transfering data...")
+
+		start := time.Now()
+		n, err := io.Copy(file, s)
+		if err != nil {
+			log.Printf("Error receiving data: %s", err)
+		}
+		end := time.Now()
+
+		log.Printf("Received %d bytes in %s", n, end.Sub(start))
+	} else {
+		var wg sync.WaitGroup
+		var count int32
+
+		dataStreams := make([]network.Stream, 0, *streams)
+		for i := 0; i < *streams; i++ {
+			s, err := host.NewStream(cctx, pi.ID, TestProtocol)
+			if err != nil {
+				log.Fatal(err)
+			}
+			defer s.Close()
+			dataStreams = append(dataStreams, s)
+		}
+
+		log.Printf("Transferring data in %d parallel streams", *streams)
+
+		start := time.Now()
+		for i := 0; i < *streams; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				file, err := os.OpenFile("/dev/null", os.O_WRONLY, 0)
+				if err != nil {
+					log.Fatal(err)
+				}
+				defer file.Close()
+
+				n, err := io.Copy(file, dataStreams[i])
+				if err != nil {
+					log.Printf("Error receiving data: %s", err)
+				}
+				atomic.AddInt32(&count, int32(n))
+			}(i)
+		}
+
+		wg.Wait()
+		end := time.Now()
+		log.Printf("Received %d bytes in %s", count, end.Sub(start))
+
 	}
-	defer s.Close()
-
-	file, err := os.OpenFile("/dev/null", os.O_WRONLY, 0)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer file.Close()
-
-	log.Printf("Transfering data...")
-
-	start := time.Now()
-	n, err := io.Copy(file, s)
-	if err != nil {
-		log.Printf("Error receiving data: %s", err)
-	}
-	end := time.Now()
-
-	log.Printf("Received %d bytes in %s", n, end.Sub(start))
 }
