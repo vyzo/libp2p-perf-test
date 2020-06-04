@@ -91,7 +91,7 @@ func main() {
 		log.Printf("Received %d bytes in %s", n, end.Sub(start))
 	} else {
 		var wg sync.WaitGroup
-		var count int32
+		var count int64
 
 		dataStreams := make([]network.Stream, 0, *streams)
 		for i := 0; i < *streams; i++ {
@@ -120,7 +120,7 @@ func main() {
 				if err != nil {
 					log.Printf("Error receiving data: %s", err)
 				}
-				atomic.AddInt32(&count, int32(n))
+				atomic.AddInt64(&count, n)
 			}(i)
 		}
 
